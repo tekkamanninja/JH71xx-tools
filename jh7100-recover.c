@@ -22,7 +22,7 @@
 #include <unistd.h>
 
 
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
 #define debug(format, ...) printf("Debug:" format "\n", ##__VA_ARGS__);
@@ -435,7 +435,7 @@ static void update_fw_payload(const char *filename)
 		if (ret != sizeof(cmd2))
 			exit(EXIT_FAILURE);
 	} while(strncmp(xmodem_ddrinit_str, buf, sizeof(xmodem_ddrinit_str) - 1));
-	debug("Hit: %s", update_str);
+	debug("Hit: %s", xmodem_ddrinit_str);
 
 	fflush(stdout);
 	close(serial_f);
@@ -449,6 +449,7 @@ static void update_fw_payload(const char *filename)
 		exit(EXIT_FAILURE);
 
 	close(serial_f);
+/*
 	printf("Awaiting confirmation...\n");
 
 	serial_f = open_serial(serial_device, SERIAL_BAUD, 1);
@@ -456,25 +457,18 @@ static void update_fw_payload(const char *filename)
 		exit(EXIT_FAILURE);
 
 	do {
-		ret = read(serial_f, buf, 1);
-		buf[ret] = '\0';
-
-		debug("GOT[%d]:%s", ret, buf);
-	} while(*buf != 't');
-
-	ret = write(serial_f, &cmd1, sizeof(cmd1));
-	if (ret != sizeof(cmd1))
-		exit(EXIT_FAILURE);
-
-	do {
 		ret = read(serial_f, buf, sizeof(buf));
 		buf[ret] = '\0';
 
 		debug("GOT[%d]:%s", ret, buf);
+		ret = write(serial_f, "1\r\n", 3);
+		if (ret != 3)
+			exit(EXIT_FAILURE);
 	} while(strcmp(update_str, buf));
 	debug("Hit: %s", update_str);
 	close(serial_f);
-
+*/
+	/* TODO: fix them in the future */
 	printf("done. please reset the board\n");
 }
 
