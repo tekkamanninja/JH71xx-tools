@@ -41,6 +41,7 @@
 #define PBWIDTH 40
 
 #define DEBUG_BAUD 9600
+#define SERIAL_BAUD 115200
 
 #define XMODEM_PAYLOAD_LEN	128	/* the length of xmodem packet payload*/
 #define BUFF_SIZE		128	/* the length of buffer*/
@@ -54,8 +55,11 @@ struct xmodem_packet {
 } __attribute__((packed));
 
 static const char bootrom_str[] = "(C)SiFive\r\n";
+static const char ddrinit_str[] = "DDR clk ";
+static const char update_str[] = "1:quit";
 static const char success_str[] = "updata success\r\n";
 static const char xmodem_str[] = "send a file by xmodem\r\n";
+static const char xmodem_ddrinit_str[] = "send file by xmodem";
 
 static const char *serial_device;
 static const char *progname;
@@ -125,6 +129,7 @@ static int xmodem_send(int serial_f, const char *filename)
 
 	fstat(fd, &stat);
 	len = len_f = stat.st_size;
+	printf("\tfile length is %lu\n", len);
 	buf = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (!buf) {
 		perror("mmap");
@@ -378,6 +383,101 @@ static void update_firmware(const char *filename)
 	check_success();
 }
 
+static void update_fw_payload(const char *filename)
+{
+	int ret, serial_f;
+	char cmd1[] = "\n";
+	char cmd2[] = "0\r\n";
+	char buf[BUFF_SIZE];
+
+	serial_f = open_serial(serial_device, SERIAL_BAUD, 1);
+	if (serial_f < 0)
+		exit(EXIT_FAILURE);
+
+	printf("Waiting for update mode on %s...\n", serial_device);
+
+	do {
+		ret = read(serial_f, buf, BUFF_SIZE);
+		buf[ret] = '\0';
+
+		debug("GOT[%d]:%s", ret, buf);
+	} while(strncmp(ddrinit_str, buf, sizeof(ddrinit_str) - 1));
+	debug("Hit: %s", ddrinit_str);
+
+	printf("update mode active\n\n");
+
+	printf("Uploading fw_payload.bin.out binary...\n");
+
+	ret = write(serial_f, &cmd1, sizeof(cmd1));
+	if (ret != sizeof(cmd1))
+		exit(EXIT_FAILURE);
+
+	do {
+		ret = read(serial_f, buf, BUFF_SIZE);
+		buf[ret] = '\0';
+
+		debug("GOT[%d]:%s", ret, buf);
+	} while(strncmp(update_str, buf, sizeof(update_str) - 1));
+	debug("Hit: %s", update_str);
+
+	sleep(1);
+
+	ret = write(serial_f, &cmd2, sizeof(cmd2));
+	if (ret != sizeof(cmd2))
+		exit(EXIT_FAILURE);
+
+	do {
+		ret = read(serial_f, buf, BUFF_SIZE);
+		buf[ret] = '\0';
+
+		debug("GOT[%d]:%s", ret, buf);
+		ret = write(serial_f, &cmd2, sizeof(cmd2));
+		if (ret != sizeof(cmd2))
+			exit(EXIT_FAILURE);
+	} while(strncmp(xmodem_ddrinit_str, buf, sizeof(xmodem_ddrinit_str) - 1));
+	debug("Hit: %s", update_str);
+
+	fflush(stdout);
+	close(serial_f);
+
+	serial_f = open_serial(serial_device, SERIAL_BAUD, 0);
+	if (serial_f < 0)
+		exit(EXIT_FAILURE);
+
+	ret = xmodem_send(serial_f, filename);
+	if (ret < 0)
+		exit(EXIT_FAILURE);
+
+	close(serial_f);
+	printf("Awaiting confirmation...\n");
+
+	serial_f = open_serial(serial_device, SERIAL_BAUD, 1);
+	if (serial_f < 0)
+		exit(EXIT_FAILURE);
+
+	do {
+		ret = read(serial_f, buf, 1);
+		buf[ret] = '\0';
+
+		debug("GOT[%d]:%s", ret, buf);
+	} while(*buf != 't');
+
+	ret = write(serial_f, &cmd1, sizeof(cmd1));
+	if (ret != sizeof(cmd1))
+		exit(EXIT_FAILURE);
+
+	do {
+		ret = read(serial_f, buf, sizeof(buf));
+		buf[ret] = '\0';
+
+		debug("GOT[%d]:%s", ret, buf);
+	} while(strcmp(update_str, buf));
+	debug("Hit: %s", update_str);
+	close(serial_f);
+
+	printf("done. please reset the board\n");
+}
+
 static void usage(void)
 {
 	fprintf(stderr,
@@ -386,12 +486,15 @@ static void usage(void)
 		"-r, --recovery <filename>	: Bootloader recovery firmware.\n"
 		"-b, --bootloader <filename>	: Second stage bootloader.\n"
 		"-d, --ddrinit <filename>	: DRAM initialization firmware.\n"
+		"-f, --fwpayload <filename>	: fw_payload.bin.out file.\n"
+		"	update OpenSBI+U-Boot/UEFI, -r/-b/-d will be IGNORED.\n"
 		"-h, --help			: Show this help.\n", progname);
 }
 
-static const char *optstring = "-hD:r:b:d:";
+static const char *optstring = "-hD:f:r:b:d:";
 static const struct option long_options[] = {
 	{ "device", 1, NULL, 'D' },
+	{ "fwpayload", 1, NULL, 'f' },
 	{ "recovery", 1, NULL, 'r' },
 	{ "bootloader", 1, NULL, 'b' },
 	{ "ddrinit", 1, NULL, 'd' },
@@ -402,6 +505,7 @@ static const struct option long_options[] = {
 int main(int argc, char **argv)
 {
 	char c, *recovery_f = NULL, *bootloader_f = NULL, *ddr_init_f = NULL;
+	char *fw_payload_f = NULL;
 
 	progname = argv[0];
 
@@ -419,6 +523,9 @@ int main(int argc, char **argv)
 		case 'D':
 			serial_device = optarg;
 			break;
+		case 'f':
+			fw_payload_f = optarg;
+			break;
 		case 'h':
 			usage();
 			exit(EXIT_SUCCESS);
@@ -428,12 +535,18 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if(serial_device) {
-		initialize();
-	} else {
+	if(!serial_device) {
 		fprintf(stderr, "Need serial device path.\n");
 		goto error;
 	}
+
+	if(fw_payload_f) {
+		update_fw_payload(fw_payload_f);
+		printf("\nfw_payload(OpenSBI+U-Boot) update completed!\n");
+		exit(EXIT_SUCCESS);
+	}
+
+	initialize();
 
 	if(recovery_f) {
 		printf("Uploading recovery binary...\n");
